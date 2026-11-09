@@ -1,0 +1,9 @@
+# 运行时数据（用户上传算法的本地暂存，勿入库）
+runtime-workspace/
+
+# 构建产物
+awesomeProject.exe
+*.exe
+
+# IDE
+.idea/

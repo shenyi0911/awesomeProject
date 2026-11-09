@@ -1,0 +1,32 @@
+server:
+  host: 0.0.0.0
+  port: 8080
+  mode: debug
+
+log:
+  level: info
+
+# 仓储实现：memory=内存(重启数据丢失) / dapr=Dapr 状态存储(持久化) / sql=直连 PostgreSQL 多表关系结构
+repository:
+  type: sql          # memory -> dapr -> sql
+  dapr:
+    httpPort: "3500" # 与 dapr run 默认 sidecar 端口一致
+    storeName: statestore
+  # type=sql 时生效：直连 PostgreSQL，程序启动自动 CREATE TABLE IF NOT EXISTS
+  sql:
+    driver: postgres
+    dsn: "host=127.0.0.1 port=54329 user=postgres password=123456 dbname=dapr sslmode=disable"
+
+# 文件存储：memory=本地目录(开发) / s3=S3 兼容对象存储（当前后端 RustFS，由 MinIO 复制式迁移而来）
+# 迁移方式：复制式（mc mirror），切勿让 RustFS 直接挂载 C:\minio\data —— 标准 RustFS 二进制不含 rio-v2，
+# 原地读取 MinIO 磁盘格式为 Preview 且不可靠，直接挂载有清空/无法识别数据风险。详见 migrate-minio-to-rustfs.ps1。
+fileStorage:
+  type: s3
+  s3:
+    endpoint: 127.0.0.1:9000   # RustFS S3 API 端口（控制台 9001）
+    accessKey: minioadmin
+    secretKey: minioadmin       # 需与 RustFS 启动凭据一致（迁移时设为与源 MinIO 相同，便于无缝切换）
+    useSSL: false
+    bucket: algorithm-files      # 首次启动自动建桶（若不存在）
+  memory:
+    rootDir: ./.file-storage-mem
