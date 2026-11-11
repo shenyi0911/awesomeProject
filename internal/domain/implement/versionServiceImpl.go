@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -232,8 +233,17 @@ func (s *versionService) Publish(id string, operator string) (*entity.AlgorithmV
 	}
 
 	// 发布前校验：该版本是否具备被运行时拉起所需的最小文件集（algorithm.yaml + entry 指向的主文件）
-	if err := s.validateLaunchable(v); err != nil {
+	mfst, err := s.validateLaunchable(v)
+	if err != nil {
 		return nil, err
+	}
+	// 发布时把 algorithm.yaml 的 methods 契约序列化进 parameter_spec，供网关校验与前端调试页生成表单/示例
+	if mfst != nil && len(mfst.Methods) > 0 {
+		if b, jerr := json.Marshal(mfst.Methods); jerr == nil {
+			v.ParameterSpec = string(b)
+		} else {
+			logger.Warn("publish: methods 契约序列化失败，跳过落库", "error", jerr)
+		}
 	}
 
 	// 先归档同一算法下所有非归档版本（草稿/已发布），保证唯一性
@@ -275,9 +285,9 @@ func (s *versionService) RevertPublish(id string, operator string) error {
 // validateLaunchable 发布前校验：版本是否具备被运行时拉起所需的最小文件集。
 // 必须包含 algorithm.yaml（启动契约），且其声明的 entry 所指向的主文件（如 SvyCalc.dll / app.py）
 // 已随版本上传；否则发布后运行时拉起必失败。校验在归档其他版本之前进行，避免误伤。
-func (s *versionService) validateLaunchable(v *entity.AlgorithmVersion) error {
+func (s *versionService) validateLaunchable(v *entity.AlgorithmVersion) (*runtime.Manifest, error) {
 	if len(v.Files) == 0 {
-		return errors.New("版本没有任何文件，无法启动算法（请先上传 algorithm.yaml 与可运行产物）")
+		return nil, errors.New("版本没有任何文件，无法启动算法（请先上传 algorithm.yaml 与可运行产物）")
 	}
 	// 定位 algorithm.yaml
 	var yamlFile *entity.AlgorithmFile
@@ -288,29 +298,29 @@ func (s *versionService) validateLaunchable(v *entity.AlgorithmVersion) error {
 		}
 	}
 	if yamlFile == nil {
-		return errors.New("缺少 algorithm.yaml（启动契约），无法启动算法")
+		return nil, errors.New("缺少 algorithm.yaml（启动契约），无法启动算法")
 	}
 	rc, derr := s.storage.Download(context.Background(), yamlFile.Path)
 	if derr != nil {
-		return fmt.Errorf("读取 algorithm.yaml 失败: %w", derr)
+		return nil, fmt.Errorf("读取 algorithm.yaml 失败: %w", derr)
 	}
 	data, rerr := io.ReadAll(rc)
 	rc.Close()
 	if rerr != nil {
-		return fmt.Errorf("读取 algorithm.yaml 失败: %w", rerr)
+		return nil, fmt.Errorf("读取 algorithm.yaml 失败: %w", rerr)
 	}
 	mfst, perr := validateManifestContent(data)
 	if perr != nil {
-		return perr
+		return nil, perr
 	}
 	mainFile := entryMainFile(mfst.Entry)
 	if mainFile == "" {
-		return errors.New("algorithm.yaml 的 entry 无法解析出启动文件")
+		return nil, errors.New("algorithm.yaml 的 entry 无法解析出启动文件")
 	}
 	if !entryFilePresent(mainFile, v.Files) {
-		return fmt.Errorf("entry 指向的启动文件「%s」未随版本上传，无法启动算法", mainFile)
+		return nil, fmt.Errorf("entry 指向的启动文件「%s」未随版本上传，无法启动算法", mainFile)
 	}
-	return nil
+	return mfst, nil
 }
 
 // entryMainFile 从 entry 命令中取出被执行的脚本/程序文件名（如 "dotnet SvyCalc.dll" → "SvyCalc.dll"）。

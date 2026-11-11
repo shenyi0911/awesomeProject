@@ -39,6 +39,7 @@ func NewCalculateHandler(rt *runtime.Manager, algoSvc service.AlgorithmService, 
 func (h *CalculateHandler) RegisterRoutes(rg *gin.RouterGroup) {
 	rg.POST("/:code/:method", h.InvokeGeneric)
 	rg.GET("/:code/metadata", h.Metadata) // 算法自描述（调用方据此发现该算法的方法名/单位）
+	rg.GET("/:code/contract", h.Contract) // 平台侧结构化方法契约（Publish 时从 algorithm.yaml 的 methods 段落库）
 }
 
 // InvokeGeneric 通用转发：/api/v1/{code}/{method} -> Dapr invoke {code}/method/{method}。
@@ -190,4 +191,25 @@ func (h *CalculateHandler) Metadata(c *gin.Context) {
 		return
 	}
 	c.Data(status, "application/json; charset=utf-8", respBody)
+}
+
+// Contract 返回平台侧结构化方法契约（算法无关、不依赖算法进程）。
+// 契约由 Publish 时从 algorithm.yaml 的 methods 段解析并落库到版本的 parameter_spec 字段；
+// 供前端调试页生成表单/示例，也供网关做入参级校验。
+// 无结构化契约时返回空 methods（前端应回退到 /metadata 的方法名列表）。
+func (h *CalculateHandler) Contract(c *gin.Context) {
+	code := c.Param("code")
+	methods, err := h.algoSvc.GetContract(code)
+	if err != nil {
+		response.Error(c, response.CodeNotFound, err.Error())
+		return
+	}
+	capabilities := make([]string, 0, len(methods))
+	for _, m := range methods {
+		capabilities = append(capabilities, m.Name)
+	}
+	response.Success(c, gin.H{
+		"capabilities": capabilities,
+		"methods":      methods,
+	})
 }

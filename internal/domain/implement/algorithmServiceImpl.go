@@ -2,6 +2,7 @@ package implement
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"regexp"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"awesomeProject/internal/domain/service"
 	"awesomeProject/internal/filestorage"
 	repoiface "awesomeProject/internal/repository/service"
+	"awesomeProject/internal/runtime"
 	"awesomeProject/pkg/logger"
 	"awesomeProject/pkg/utils"
 )
@@ -134,6 +136,30 @@ func (s *algorithmService) GetByID(id string) (*entity.Algorithm, error) {
 
 func (s *algorithmService) GetByCode(code string) (*entity.Algorithm, error) {
 	return s.repo.GetByCode(code)
+}
+
+// GetContract 返回该算法当前已发布（active）版本的结构化方法契约。
+// 契约在 Publish 时由 algorithm.yaml 的 methods 段解析后存入版本的 parameter_spec 字段。
+// 无结构化契约时返回 nil（前端应回退到 /metadata 的方法名列表）。
+func (s *algorithmService) GetContract(code string) ([]runtime.MethodSpec, error) {
+	algo, err := s.repo.GetByCode(code)
+	if err != nil {
+		return nil, err
+	}
+	ver, err := s.verSvc.GetActive(algo.ID)
+	if err != nil {
+		// 无 active 版本即无契约（未发布）
+		return nil, nil
+	}
+	if strings.TrimSpace(ver.ParameterSpec) == "" {
+		return nil, nil
+	}
+	var methods []runtime.MethodSpec
+	if err := json.Unmarshal([]byte(ver.ParameterSpec), &methods); err != nil {
+		logger.Warn("GetContract: parameter_spec 解析失败", "code", code, "error", err)
+		return nil, nil
+	}
+	return methods, nil
 }
 
 func (s *algorithmService) List(req request.ListAlgorithmRequest) ([]entity.Algorithm, int) {
