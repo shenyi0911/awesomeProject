@@ -1,0 +1,203 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "指标口径",
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "### 调用阶段\n- `total`：平台一次调用总耗时（不含 HTTP 读写、鉴权等最外层开销）。\n- `platform`：`total - dapr_call`，平台侧纯开销。\n- `gate`：实例检查 + 发布闸门（DB/缓存）。\n- `meta`：算法元数据读取（带缓存）。\n- `session`：有状态算法的会话解析（DB）。\n- `dapr_call`：平台 → Dapr sidecar → 算法 → 返回。\n- `algorithm`：Dapr → 本地计时代理 → 算法应用，表示算法自身执行耗时（含本地 HTTP 转发开销）。\n- `postprocess`：会话注入、算法元数据回填。\n\n**Dapr 开销 ≈ dapr_call - algorithm**。下方三张图按算法/方法展示平台、算法、Dapr 的平均耗时。"
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "HTTP QPS（按接口模板）",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (method, route) (rate(awesome_http_requests_total[1m]))",
+          "legendFormat": "{{method}} {{route}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "HTTP P95 耗时（按接口模板）",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(awesome_http_request_duration_seconds_bucket[1m])))",
+          "legendFormat": "{{route}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "HTTP 5xx 比例",
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 13 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "decimals": 2, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.05 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(awesome_http_requests_total{status=~\"5..\"}[1m])) / clamp_min(sum(rate(awesome_http_requests_total[1m])), 1e-9)"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "调用阶段 P95（method=calculate）",
+      "gridPos": { "h": 8, "w": 18, "x": 6, "y": 13 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, phase) (rate(awesome_invoke_phase_duration_seconds_bucket{method=\"calculate\"}[1m])))",
+          "legendFormat": "{{phase}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "各算法总耗时 P95",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, code) (rate(awesome_invoke_phase_duration_seconds_bucket{phase=\"total\"}[1m])))",
+          "legendFormat": "{{code}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "各算法 Dapr+算法耗时 P95",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, code) (rate(awesome_invoke_phase_duration_seconds_bucket{phase=\"dapr_call\"}[1m])))",
+          "legendFormat": "{{code}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "平台开销均值（total - dapr_call）",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 29 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (code) (rate(awesome_invoke_phase_duration_seconds_sum{phase=\"total\"}[1m])) / clamp_min(sum by (code) (rate(awesome_invoke_phase_duration_seconds_count{phase=\"total\"}[1m])), 1e-9) - sum by (code) (rate(awesome_invoke_phase_duration_seconds_sum{phase=\"dapr_call\"}[1m])) / clamp_min(sum by (code) (rate(awesome_invoke_phase_duration_seconds_count{phase=\"dapr_call\"}[1m])), 1e-9)",
+          "legendFormat": "{{code}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "调用量（按算法/方法/状态）",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 29 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (code, method, status) (rate(awesome_invoke_total[1m]))",
+          "legendFormat": "{{code}}/{{method}} {{status}}"
+        }
+      ]
+    }
+    ,
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "各算法/方法 平台耗时均值",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 37 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (code, method) (rate(awesome_invoke_phase_duration_seconds_sum{phase=\"platform\"}[1m])) / clamp_min(sum by (code, method) (rate(awesome_invoke_phase_duration_seconds_count{phase=\"platform\"}[1m])), 1e-9)",
+          "legendFormat": "{{code}}/{{method}}"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "各算法/方法 算法耗时均值",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 37 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (code, method) (rate(awesome_invoke_phase_duration_seconds_sum{phase=\"algorithm\"}[1m])) / clamp_min(sum by (code, method) (rate(awesome_invoke_phase_duration_seconds_count{phase=\"algorithm\"}[1m])), 1e-9)",
+          "legendFormat": "{{code}}/{{method}}"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "各算法/方法 Dapr 开销均值",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 37 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (code, method) (rate(awesome_invoke_phase_duration_seconds_sum{phase=\"dapr_call\"}[1m])) / clamp_min(sum by (code, method) (rate(awesome_invoke_phase_duration_seconds_count{phase=\"dapr_call\"}[1m])), 1e-9) - sum by (code, method) (rate(awesome_invoke_phase_duration_seconds_sum{phase=\"algorithm\"}[1m])) / clamp_min(sum by (code, method) (rate(awesome_invoke_phase_duration_seconds_count{phase=\"algorithm\"}[1m])), 1e-9)",
+          "legendFormat": "{{code}}/{{method}}"
+        }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["awesome", "demo", "algorithm"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "timezone": "browser",
+  "title": "Awesome Algorithm Platform",
+  "uid": "awesome-demo",
+  "version": 1
+}

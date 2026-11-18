@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # The platform runs on the host; Prometheus runs in Docker and reaches it via host.docker.internal.
+  - job_name: awesome-platform
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8080"]
+
+  # Optional: scrape one Dapr sidecar per algorithm to split "dapr_call" into sidecar and algorithm time.
+  # Dapr sidecars default to port 9090 and must be given a unique --metrics-port when multiple
+  # algorithms run on the same host. Add one target per sidecar, for example:
+  # - job_name: awesome-dapr
+  #   static_configs:
+  #     - targets: ["host.docker.internal:19090"]
+  #       labels:
+  #         code: "demo"

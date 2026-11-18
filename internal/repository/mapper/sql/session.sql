@@ -5,6 +5,19 @@ INSERT INTO algorithm_sessions
 	(session_id, algorithm_code, status, request_count, created_at, expires_at, last_active_at)
 VALUES ($1,$2,$3,$4,$5,$6,$7)
 
+-- 原子配额：事务内先取算法维度的 advisory lock，再统计活跃会话，避免并发超额。
+-- name: SessionLockCode
+SELECT pg_advisory_xact_lock(hashtext($1))
+
+-- name: SessionCountActive
+SELECT COUNT(*) FROM algorithm_sessions
+WHERE algorithm_code=$1 AND status='active' AND expires_at > $2
+
+-- name: SessionCreateLimitedInsert
+INSERT INTO algorithm_sessions
+	(session_id, algorithm_code, status, request_count, created_at, expires_at, last_active_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7)
+
 -- name: SessionGet
 SELECT session_id, algorithm_code, status, request_count, created_at, expires_at, last_active_at
 FROM algorithm_sessions WHERE session_id=$1
@@ -16,6 +29,9 @@ WHERE session_id=$3
 
 -- name: SessionDelete
 DELETE FROM algorithm_sessions WHERE session_id=$1
+
+-- name: SessionDeleteByCode
+DELETE FROM algorithm_sessions WHERE algorithm_code=$1
 
 -- name: SessionDeleteExpired
 DELETE FROM algorithm_sessions WHERE expires_at < $1

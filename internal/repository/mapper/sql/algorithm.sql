@@ -15,7 +15,12 @@ UPDATE algorithms SET
 WHERE id=$1
 
 -- name: AlgorithmDelete
-DELETE FROM algorithms WHERE id=$1
+DELETE FROM algorithms a
+WHERE a.id=$1
+  AND NOT EXISTS (
+    SELECT 1 FROM algorithm_versions v
+    WHERE v.algorithm_id = a.id AND v.status = 'released' AND v.is_active = true
+  )
 
 -- name: AlgorithmGetByID
 SELECT id, name, code, description, category, author, language, scene, stateful, update_user, port, created_at, updated_at
@@ -38,16 +43,32 @@ LEFT JOIN LATERAL (
 	SELECT version, status
 	FROM algorithm_versions
 	WHERE algorithm_id = a.id
-	ORDER BY created_at DESC
+	ORDER BY created_at DESC, id DESC
 	LIMIT 1
 ) lv ON true
 WHERE ($1 = '' OR a.name ILIKE '%' || $1 || '%')
   AND ($2 = '' OR a.code ILIKE '%' || $2 || '%')
-ORDER BY a.created_at DESC
+ORDER BY a.created_at DESC, a.id DESC
 LIMIT $3 OFFSET $4
 
--- name: AlgorithmExistsByPort
-SELECT COUNT(*) FROM algorithms WHERE port=$1 AND ($2 = '' OR id <> $2)
+-- name: AlgorithmListAll
+SELECT a.id, a.name, a.code, a.description, a.category, a.author, a.language, a.scene, a.stateful, a.update_user, a.port, a.created_at, a.updated_at,
+		COALESCE(lv.version, ''), COALESCE(lv.status, '')
+FROM algorithms a
+LEFT JOIN LATERAL (
+	SELECT version, status
+	FROM algorithm_versions
+	WHERE algorithm_id = a.id
+	ORDER BY created_at DESC, id DESC
+	LIMIT 1
+) lv ON true
+ORDER BY a.created_at DESC, a.id DESC
+
+-- name: AlgorithmCountAll
+SELECT COUNT(*) FROM algorithms
+
+-- name: AlgorithmCategoryCounts
+SELECT COALESCE(category, ''), COUNT(*) FROM algorithms GROUP BY category
 
 -- name: AlgorithmPortForCode
 SELECT port FROM algorithms WHERE code=$1

@@ -1,21 +1,25 @@
 package main
 
 import (
-	"awesomeProject/internal/domain/session"
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"awesomeProject/internal/app"
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/domain/implement"
 	"awesomeProject/internal/filestorage"
 	"awesomeProject/internal/handler"
+	platformmetrics "awesomeProject/internal/metrics"
 	"awesomeProject/internal/repository/dao"
 	repoimpl "awesomeProject/internal/repository/implement"
 	"awesomeProject/internal/router"
@@ -28,7 +32,6 @@ func main() {
 	if cfgPath == "" {
 		cfgPath = "config.yaml"
 	}
-
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		logger.Error("load config failed", "error", err)
@@ -38,18 +41,25 @@ func main() {
 	setupLogger(cfg.Log.Level)
 	gin.SetMode(cfg.Server.Mode)
 
-	// 仓储层：PostgreSQL 直连（dao 只管连接/建表，仓储 SQL 实现在 implement 子包）
-	db, err := dao.OpenSQLDB(cfg.Repository.SQL.Driver, cfg.Repository.SQL.DSN)
+	// Startup dependency initialization (database connection, schema, bucket) shares a single timeout.
+	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancelStartup()
+
+	db, err := dao.OpenSQLDB(startupCtx, cfg.Repository.SQL.Driver, cfg.Repository.SQL.DSN)
 	if err != nil {
 		logger.Error("open sql repository failed", "error", err)
 		os.Exit(1)
 	}
+	db.SetMaxOpenConns(cfg.Repository.SQL.MaxOpenConns)
+	db.SetMaxIdleConns(cfg.Repository.SQL.MaxIdleConns)
+	db.SetConnMaxLifetime(cfg.Repository.SQL.ConnMaxLifetime.D())
+	db.SetConnMaxIdleTime(cfg.Repository.SQL.ConnMaxIdleTime.D())
+
 	algoRepo := repoimpl.NewSQLAlgorithmRepository(db)
 	verRepo := repoimpl.NewSQLVersionRepository(db)
 	infoRepo := repoimpl.NewInfoRepository(algoRepo, verRepo)
 	sessRepo := repoimpl.NewSQLSessionRepository(db)
 
-	// 文件存储：S3 兼容对象存储（当前后端 RustFS，minio-go/v7 通用 S3 客户端）
 	fileStorage, err := filestorage.NewS3FileStorage(
 		cfg.FileStorage.S3.Endpoint,
 		cfg.FileStorage.S3.AccessKey,
@@ -62,58 +72,123 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 服务层（注意顺序：verSvc 依赖 algoRepo；algoSvc 依赖 verSvc 以实现创建算法时自动生成 v1）
+	// Service layer: algoSvc depends on verSvc to cascade version cleanup when an algorithm is deleted.
 	verSvc := implement.NewVersionService(algoRepo, verRepo, fileStorage)
-	algoSvc := implement.NewAlgorithmService(algoRepo, verSvc, fileStorage)
 	infoSvc := implement.NewInfoService(infoRepo)
 
-	// 会话服务（有状态算法状态关联）：落库 PostgreSQL，后台定时清理过期会话
-	sessSvc := session.NewSessionService(sessRepo, envDuration("SESSION_TTL", 30*time.Minute))
-	sessSvc.StartGC(context.Background(), envDuration("SESSION_GC_INTERVAL", 5*time.Minute))
+	// Session service: sessions are persisted in PostgreSQL and expired ones are purged periodically.
+	sessSvc := implement.NewSessionService(sessRepo, cfg.Session.TTL.D(), cfg.Session.MaxPerAlgorithm)
 
-	// 算法运行时编排器（执行层，合并进本进程）：
-	// 算法文件以「已发布版本」为单位存储在 S3 兼容对象存储（当前后端 RustFS），平台是真相源，运行时不依赖任何固定目录。
-	// 启动时按「最新版本=released」的算法登记并拉起；「发布」动作触发拉起、「归档」动作在其已无已发布版本时回收。
-	// 拉起时从 MinIO 下载该已发布版本全部文件到本地暂存目录，解析其中 algorithm.yaml 得到启动契约后用 dapr run 拉起。
-	// 通过同进程 PostgreSQL 直接做「发布状态闸门」校验（不含懒拉起/空闲回收/热监听）。
+	lifeCtx, stopLife := context.WithCancel(context.Background())
+	sessSvc.StartGC(lifeCtx, cfg.Session.GCInterval.D())
+
+	// Runtime orchestrator: launches published algorithms on startup and starts/stops processes on publish/archive.
+	platformMetrics := platformmetrics.New()
 	rtMgr := runtime.New(runtime.Options{
-		Workspace:           envOr("RUNTIME_WORKSPACE", runtime.DefaultWorkspace()),
-		DaprBin:             envOr("DAPR_BIN", "dapr"),
-		DefaultAlgo:         envOr("DEFAULT_ALGO", "surveyRD"),
-		ReleaseCheckEnabled: isOn(envOr("RUNTIME_RELEASE_CHECK", "on")),
-		ReleaseCacheTTL:     envDuration("RUNTIME_RELEASE_CACHE_TTL", 30*time.Second),
-		StatusQuerier:       &runtime.SQLStatusQuerier{DB: db},
-		Resolver:            verRepo.(runtime.VersionResolver), // verRepo 动态类型 *sqlVersionRepo 实现该接口
-		Downloader:          fileStorage,                       // s3FileStorage 满足 BlobDownloader
-		PortResolver:        algoRepo,                          // *sqlAlgorithmRepo 实现 PortForCode（按 code 取平台指定端口）
+		Workspace:           cfg.Runtime.Workspace,
+		DaprBin:             cfg.Runtime.DaprBin,
+		ReleaseCheckEnabled: cfg.Runtime.ReleaseCheck,
+		ReleaseCacheTTL:     cfg.Runtime.ReleaseCacheTTL.D(),
+		InvokeTimeout:       cfg.Runtime.InvokeTimeout.D(),
+		MaxRestarts:         cfg.Runtime.MaxRestarts,
+		Resolver:            verRepo,
+		Downloader:          fileStorage,
+		PortResolver:        algoRepo,
+		ObserveAlgorithm: func(code, method string, d time.Duration) {
+			platformMetrics.ObserveInvokePhase(code, method, platformmetrics.PhaseAlgorithm, d)
+		},
 	})
-	rtMgr.Start()
+	algoSvc := implement.NewAlgorithmService(algoRepo, verSvc, sessSvc, fileStorage, rtMgr)
+	rtMgr.Start(lifeCtx)
 
-	// 处理器
+	// Application layer: orchestration for publish/launch/rollback and invoke/session/forward.
+	versionApp := app.NewVersionApp(verSvc, rtMgr)
+	invokeApp := app.NewInvokeApp(rtMgr, algoSvc, sessSvc, cfg.Session.StatefulCacheTTL.D(), platformMetrics)
+	// Algorithm updates/deletes must drop cached invocation metadata immediately.
+	algoSvc.SetMetaInvalidator(invokeApp.InvalidateMeta)
+
 	deps := &router.Dependencies{
 		AlgorithmHandler: handler.NewAlgorithmHandler(algoSvc),
-		VersionHandler:   handler.NewVersionHandler(verSvc, rtMgr),
+		VersionHandler:   handler.NewVersionHandler(verSvc, versionApp, cfg.Server.MaxFileBytes),
 		InfoHandler:      handler.NewInfoHandler(infoSvc),
-		CalculateHandler: handler.NewCalculateHandler(rtMgr, algoSvc, sessSvc),
+		CalculateHandler: handler.NewCalculateHandler(invokeApp),
+		Readiness: func(ctx context.Context) error {
+			if err := db.PingContext(ctx); err != nil {
+				return fmt.Errorf("database ping failed: %w", err)
+			}
+			if _, err := exec.LookPath(cfg.Runtime.DaprBin); err != nil {
+				return fmt.Errorf("dapr binary %q not found: %w", cfg.Runtime.DaprBin, err)
+			}
+			workspace := cfg.Runtime.Workspace
+			if workspace == "" {
+				workspace = runtime.DefaultWorkspace()
+			}
+			if err := os.MkdirAll(workspace, 0o755); err != nil {
+				return fmt.Errorf("runtime workspace is unavailable: %w", err)
+			}
+			f, err := os.CreateTemp(workspace, ".ready-*")
+			if err != nil {
+				return fmt.Errorf("runtime workspace is not writable: %w", err)
+			}
+			name := f.Name()
+			_ = f.Close()
+			_ = os.Remove(name)
+			return fileStorage.Health(ctx)
+		},
+		AuthToken:        cfg.Auth.Token,
+		AuthOperator:     cfg.Auth.Operator,
+		CORSAllowOrigins: cfg.Server.CORSAllowOrigins,
+		MaxJSONBody:      cfg.Server.MaxJSONBody,
+		MaxUploadBody:    cfg.Server.MaxUploadBody,
+		MaxFileBytes:     cfg.Server.MaxFileBytes,
+		MultipartMemory:  cfg.Server.MaxMultipartMemory,
+		Metrics:          platformMetrics,
 	}
 
-	// 优雅退出：清理算法子进程（dapr + 算法本体）
+	srv := &http.Server{
+		Addr:              cfg.Addr(),
+		Handler:           router.New(deps),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       cfg.Server.ReadTimeout.D(),
+		WriteTimeout:      cfg.Server.WriteTimeout.D(),
+		IdleTimeout:       cfg.Server.IdleTimeout.D(),
+	}
+
+	serverErr := make(chan error, 1)
 	go func() {
-		c := make(chan os.Signal, 1)
-		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-		<-c
-		logger.Info("收到退出信号，清理算法子进程...")
-		rtMgr.Stop()
-		_ = db.Close()
-		os.Exit(0)
+		logger.Info("server starting", "addr", cfg.Addr(), "mode", cfg.Server.Mode,
+			"repository", cfg.Repository.Type, "auth", cfg.Auth.Token != "")
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+		}
 	}()
 
-	// 启动服务
-	engine := router.New(deps)
-	logger.Info("server starting", "addr", cfg.Addr(), "mode", cfg.Server.Mode, "repository", cfg.Repository.Type)
-	if err := engine.Run(cfg.Addr()); err != nil {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+
+	exitCode := 0
+	select {
+	case err := <-serverErr:
 		logger.Error("server run failed", "error", err)
-		os.Exit(1)
+		exitCode = 1
+	case s := <-sig:
+		logger.Info("received shutdown signal, shutting down gracefully", "signal", s.String())
+	}
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout.D())
+	defer cancelShutdown()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logger.Warn("http shutdown failed", "error", err)
+	}
+	// Stop background tasks and algorithm processes before closing the database.
+	stopLife()
+	rtMgr.Stop()
+	if err := db.Close(); err != nil {
+		logger.Warn("close db failed", "error", err)
+	}
+	logger.Info("server exited")
+	if exitCode != 0 {
+		os.Exit(exitCode)
 	}
 }
 
@@ -130,26 +205,4 @@ func setupLogger(levelStr string) {
 		level = slog.LevelInfo
 	}
 	logger.SetLevel(level)
-}
-
-// envOr 取环境变量，缺失时返回默认值。
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
-}
-
-func envDuration(k string, def time.Duration) time.Duration {
-	if v := os.Getenv(k); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
-	}
-	return def
-}
-
-func isOn(v string) bool {
-	lv := strings.ToLower(strings.TrimSpace(v))
-	return lv == "on" || lv == "true" || lv == "1" || lv == "yes"
 }

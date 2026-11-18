@@ -1,32 +1,63 @@
 server:
-  host: 0.0.0.0
-  port: 8080
-  mode: debug
+  host: ${SERVER_HOST:-0.0.0.0}
+  port: ${SERVER_PORT:-8080}
+  mode: ${SERVER_MODE:-debug}
+  # 长任务（发布拉起/大文件上传/打包下载）需要较长写超时。
+  readTimeout: 5m
+  writeTimeout: 10m
+  idleTimeout: 60s
+  shutdownTimeout: 15s
+  maxJsonBodyBytes: 8388608      # 8 MiB，普通 JSON 请求体上限
+  maxUploadBodyBytes: 1073741824 # 1 GiB，multipart 上传上限
+  maxFileBytes: 268435456        # 256 MiB，单个文件上限
+  maxMultipartMemoryBytes: 8388608 # 8 MiB，multipart 内存缓冲阈值，超出写临时文件
+  # 跨域白名单；留空或 ["*"] 表示允许所有来源
+  corsAllowOrigins:
+    - "*"
 
 log:
-  level: info
+  level: ${LOG_LEVEL:-info}
 
-# 仓储实现：memory=内存(重启数据丢失) / dapr=Dapr 状态存储(持久化) / sql=直连 PostgreSQL 多表关系结构
+# 仓储实现：直连 PostgreSQL（程序启动自动 CREATE TABLE IF NOT EXISTS）
 repository:
-  type: sql          # memory -> dapr -> sql
-  dapr:
-    httpPort: "3500" # 与 dapr run 默认 sidecar 端口一致
-    storeName: statestore
-  # type=sql 时生效：直连 PostgreSQL，程序启动自动 CREATE TABLE IF NOT EXISTS
+  type: sql
   sql:
     driver: postgres
-    dsn: "host=127.0.0.1 port=54329 user=postgres password=123456 dbname=dapr sslmode=disable"
+    # 敏感信息从环境变量或 .env 注入，勿写入仓库
+    dsn: "${PG_DSN}"
+    maxOpenConns: 20
+    maxIdleConns: 5
+    connMaxLifetime: 30m
+    connMaxIdleTime: 5m
 
-# 文件存储：memory=本地目录(开发) / s3=S3 兼容对象存储（当前后端 RustFS，由 MinIO 复制式迁移而来）
-# 迁移方式：复制式（mc mirror），切勿让 RustFS 直接挂载 C:\minio\data —— 标准 RustFS 二进制不含 rio-v2，
-# 原地读取 MinIO 磁盘格式为 Preview 且不可靠，直接挂载有清空/无法识别数据风险。详见 migrate-minio-to-rustfs.ps1。
+# 文件存储：S3 兼容对象存储（当前后端 RustFS，可平滑替换为任意 S3 服务）
 fileStorage:
   type: s3
   s3:
-    endpoint: 127.0.0.1:9000   # RustFS S3 API 端口（控制台 9001）
-    accessKey: minioadmin
-    secretKey: minioadmin       # 需与 RustFS 启动凭据一致（迁移时设为与源 MinIO 相同，便于无缝切换）
+    endpoint: ${S3_ENDPOINT:-127.0.0.1:9000}
+    accessKey: ${S3_ACCESS_KEY}
+    secretKey: ${S3_SECRET_KEY}
     useSSL: false
-    bucket: algorithm-files      # 首次启动自动建桶（若不存在）
-  memory:
-    rootDir: ./.file-storage-mem
+    bucket: ${S3_BUCKET:-algorithm-files}
+
+# 算法运行时编排（dapr run 拉起算法进程）
+runtime:
+  workspace: ${RUNTIME_WORKSPACE:-}   # 留空使用用户缓存目录
+  daprBin: ${DAPR_BIN:-dapr}
+  releaseCheck: true
+  releaseCacheTTL: 30s
+  invokeTimeout: 60s
+  maxRestarts: 3                       # 进程异常退出后的自动重启上限（0=不重启）
+
+# 会话管理（有状态算法）
+session:
+  ttl: 30m
+  gcInterval: 5m
+  maxPerAlgorithm: 0                   # 0=不限制单算法活跃会话数
+  statefulCacheTTL: 30s
+
+# 鉴权：token 非空时要求 Authorization: Bearer <token>；留空则不启用（仅内网/开发）
+# operator 非空时作为已鉴权请求的审计操作人，优先于 query/form 中的 operator 参数
+auth:
+  token: ${API_TOKEN:-}
+  operator: ${API_OPERATOR:-}

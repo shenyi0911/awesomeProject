@@ -6,24 +6,24 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Code 业务状态码
+// Code is a business status code.
 type Code int
 
 const (
 	CodeSuccess Code = 0
-	CodeError   Code = 1
 
-	CodeBadRequest   Code = 400
-	CodeUnauthorized Code = 401
-	CodeForbidden    Code = 403
-	CodeNotFound     Code = 404
+	CodeBadRequest      Code = 400
+	CodeUnauthorized    Code = 401
+	CodeForbidden       Code = 403
+	CodeNotFound        Code = 404
+	CodeTooManyRequests Code = 429
 
 	CodeInternalError      Code = 500
 	CodeBadGateway         Code = 502
 	CodeServiceUnavailable Code = 503
 )
 
-// Response 统一响应结构
+// Response is the unified response envelope.
 type Response struct {
 	Code    Code        `json:"code"`
 	Message string      `json:"message"`
@@ -72,6 +72,8 @@ func httpStatusOf(code Code) int {
 		return http.StatusForbidden
 	case CodeNotFound:
 		return http.StatusNotFound
+	case CodeTooManyRequests:
+		return http.StatusTooManyRequests
 	case CodeInternalError:
 		return http.StatusInternalServerError
 	case CodeBadGateway:
@@ -79,6 +81,10 @@ func httpStatusOf(code Code) int {
 	case CodeServiceUnavailable:
 		return http.StatusServiceUnavailable
 	default:
-		return http.StatusOK
+		// Pass through other upstream 4xx/5xx codes instead of mapping them to 200.
+		if int(code) >= 400 && int(code) <= 599 {
+			return int(code)
+		}
+		return http.StatusInternalServerError
 	}
 }

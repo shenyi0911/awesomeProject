@@ -1,9 +1,9 @@
-# start-rustfs-docker.ps1
+﻿# start-rustfs-docker.ps1
 # 用 Docker 跑 RustFS（S3 兼容对象存储），作为 awesomeProject 的文件存储后端。
 # 镜像走华为云 SWR 国内镜像，规避 GitHub/Docker Hub 在国内被墙/慢的问题。
 # 容器由 Docker 守护进程托管，常驻不随本脚本退出而终止；命名卷 rustfs-data 持久化数据。
 #
-# 前提：已安装并启动 Docker Desktop。
+# 前提：已安装并启动 Docker Desktop（守护进程处于 Running 状态）。
 # 用法：powershell -ExecutionPolicy Bypass -File start-rustfs-docker.ps1
 
 $ErrorActionPreference = 'Stop'
@@ -11,11 +11,25 @@ $ErrorActionPreference = 'Stop'
 $RUSTFS_IMAGE = 'rustfs/rustfs:latest'
 $SWR_MIRROR   = 'swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/rustfs/rustfs:latest'
 
-# 0) 确认 docker 可用
+function Fail([string]$msg) {
+    Write-Host "ERROR: $msg" -ForegroundColor Red
+    exit 1
+}
+
+# 0) 确认 docker 命令存在
 try {
     docker --version | Out-Null
 } catch {
-    Write-Host 'ERROR: 未检测到 docker。请先安装并启动 Docker Desktop。' -ForegroundColor Red
+    Fail '未检测到 docker 命令。请确认 Docker Desktop 已安装，并将其加入 PATH。'
+}
+
+# 0.1) 确认 Docker 守护进程已运行（仅 docker.exe 存在 ≠ 守护进程 alive）
+try {
+    docker info | Out-Null
+} catch {
+    Write-Host 'ERROR: Docker 守护进程未运行（docker info 失败）。' -ForegroundColor Red
+    Write-Host '       请先启动 Docker Desktop，等待左下角变为绿点「Engine running」后再运行本脚本。' -ForegroundColor Yellow
+    Write-Host '       验证方式：在 PowerShell 执行  docker ps  应无报错地列出容器（空列表也算 alive）。' -ForegroundColor Yellow
     exit 1
 }
 
@@ -23,8 +37,12 @@ try {
 $existing = docker images --quiet $RUSTFS_IMAGE 2>$null
 if (-not $existing) {
     Write-Host "[1/4] Pulling RustFS from Huawei SWR mirror ($SWR_MIRROR) ..."
-    docker pull $SWR_MIRROR
-    docker tag $SWR_MIRROR $RUSTFS_IMAGE
+    try {
+        docker pull $SWR_MIRROR
+        docker tag $SWR_MIRROR $RUSTFS_IMAGE
+    } catch {
+        Fail "拉取/打 tag 失败：$_"
+    }
 } else {
     Write-Host '[1/4] rustfs/rustfs:latest already present, skip pull.'
 }
@@ -32,7 +50,7 @@ if (-not $existing) {
 # 2) 同名容器已存在则先移除（保留命名卷 rustfs-data 中的数据）
 if (docker ps -a --format '{{.Names}}' | Select-String '^rustfs$') {
     Write-Host '[2/4] Removing existing rustfs container (volume rustfs-data preserved) ...'
-    docker rm -f rustfs | Out-Null
+    try { docker rm -f rustfs | Out-Null } catch {}
 }
 
 # 3) 启动 RustFS：命名卷持久化；端口 9000(S3 API)/9001(控制台)。
@@ -48,7 +66,13 @@ $dockerArgs = @(
     '-e', 'RUSTFS_OBS_LOG_DIRECTORY=/var/log/rustfs/',
     $RUSTFS_IMAGE, '/usr/bin/rustfs', '/data'
 )
-docker @dockerArgs | Out-Null
+try {
+    docker @dockerArgs | Out-Null
+} catch {
+    Write-Host "ERROR: 启动 RustFS 容器失败：$_" -ForegroundColor Red
+    Write-Host '       请确认 Docker Desktop 正常运行，或执行  docker logs rustfs  查看容器日志。' -ForegroundColor Yellow
+    exit 1
+}
 
 # 4) 健康检查：探 S3 API 根路径（ListBuckets）。
 #    说明：设了访问凭据后 /health 会返回 403（强制鉴权），不能据此判断生死；
@@ -66,6 +90,7 @@ if ($up) {
     Write-Host 'RustFS is UP at http://localhost:9000  (console: http://localhost:9001)' -ForegroundColor Green
     Write-Host 'Now run in your project dir: go run .'
 } else {
-    Write-Host 'RustFS did not become healthy. Inspect logs: docker logs rustfs' -ForegroundColor Red
+    Write-Host 'RustFS 启动后未通过健康检查。排查：docker logs rustfs' -ForegroundColor Red
     exit 1
 }
+
